@@ -2,6 +2,6 @@ import { API } from 'homebridge';
 import { EightSleepPlatform } from './EightSleepPlatform';
 import { PLATFORM_NAME } from './settings';
 
-export default (api: API) => {
+module.exports = (api: API) => {
   api.registerPlatform(PLATFORM_NAME, EightSleepPlatform);
 };
