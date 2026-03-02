@@ -1,0 +1,32 @@
+{
+  "name": "homebridge-eightsleep",
+  "version": "1.0.0",
+  "displayName": "Eight Sleep",
+  "description": "Homebridge plugin for Eight Sleep Pod temperature control, presence detection, and more.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "eight sleep",
+    "eight",
+    "sleep",
+    "pod",
+    "temperature",
+    "smart bed"
+  ],
+  "author": "Matt Hall",
+  "license": "ISC",
+  "engines": {
+    "homebridge": ">=1.6.0",
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "homebridge": "^1.6.1",
+    "typescript": "^5.9.3"
+  }
+}
