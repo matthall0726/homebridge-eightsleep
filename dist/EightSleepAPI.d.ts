@@ -6,9 +6,13 @@ export interface TemperatureStatus {
         type: string;
     };
 }
-export interface DeviceStatus {
-    leftUserId?: string;
-    rightUserId?: string;
+export interface BedSide {
+    userId: string;
+    side: 'left' | 'right';
+}
+export interface DiscoveryResult {
+    deviceId: string;
+    sides: BedSide[];
 }
 export declare class EightSleepAPI {
     private readonly email;
@@ -16,31 +20,16 @@ export declare class EightSleepAPI {
     private readonly log;
     private accessToken;
     private tokenExpiry;
-    private userId;
+    private authUserId;
     private deviceId;
-    private side;
     constructor(email: string, password: string, log: Logger);
     private request;
     authenticate(): Promise<void>;
-    discover(): Promise<{
-        userId: string;
-        deviceId: string;
-        side: string;
-        features: string[];
-    }>;
-    getUserId(): string;
-    getDeviceId(): string;
-    turnOn(): Promise<void>;
-    turnOff(): Promise<void>;
-    getTemperature(): Promise<TemperatureStatus>;
-    setTemperature(level: number): Promise<void>;
-    getPresence(): Promise<boolean>;
-    getDeviceSides(): Promise<DeviceStatus>;
-    activateNapMode(): Promise<void>;
-    deactivateNapMode(): Promise<void>;
-    setAwayMode(away: boolean): Promise<void>;
-    static levelToFahrenheit(level: number): number;
-    static fahrenheitToLevel(f: number): number;
-    static celsiusToLevel(c: number): number;
+    discover(): Promise<DiscoveryResult>;
+    getTemperature(userId: string): Promise<TemperatureStatus>;
+    setTemperature(userId: string, level: number): Promise<void>;
+    turnOn(userId: string): Promise<void>;
+    turnOff(userId: string): Promise<void>;
     static levelToCelsius(level: number): number;
+    static celsiusToLevel(c: number): number;
 }

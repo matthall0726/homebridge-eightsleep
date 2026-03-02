@@ -1,6 +1,6 @@
 {
-  "name": "homebridge-eightsleep",
-  "version": "1.0.0",
+  "name": "@matthall0726/homebridge-eightsleep",
+  "version": "1.1.0",
   "displayName": "Eight Sleep",
   "description": "Homebridge plugin for Eight Sleep Pod temperature control, presence detection, and more.",
   "main": "dist/index.js",

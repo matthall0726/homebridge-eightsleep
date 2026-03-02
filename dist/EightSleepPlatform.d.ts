@@ -7,14 +7,11 @@ export declare class EightSleepPlatform implements DynamicPlatformPlugin {
     readonly Characteristic: typeof Characteristic;
     private readonly api;
     private readonly accessories;
-    private pollTimer?;
+    private readonly sideStates;
     private readonly pollingInterval;
-    private currentLevel;
-    private isOn;
-    private isPresent;
     constructor(log: Logger, config: PlatformConfig, homebridgeApi: API);
     configureAccessory(accessory: PlatformAccessory): void;
     private discoverDevices;
-    private setupServices;
+    private setupThermostat;
     private startPolling;
 }

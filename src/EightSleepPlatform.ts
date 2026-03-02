@@ -8,13 +8,14 @@ import {
   Characteristic,
 } from 'homebridge';
 
-import { EightSleepAPI } from './EightSleepAPI';
+import { EightSleepAPI, BedSide } from './EightSleepAPI';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 
-interface EightSleepPlatformConfig extends PlatformConfig {
-  email: string;
-  password: string;
-  pollingInterval?: number;
+interface SideState {
+  userId: string;
+  side: 'left' | 'right';
+  currentLevel: number;
+  isOn: boolean;
 }
 
 export class EightSleepPlatform implements DynamicPlatformPlugin {
@@ -23,13 +24,8 @@ export class EightSleepPlatform implements DynamicPlatformPlugin {
 
   private readonly api: EightSleepAPI;
   private readonly accessories: PlatformAccessory[] = [];
-  private pollTimer?: NodeJS.Timeout;
+  private readonly sideStates: Map<string, SideState> = new Map();
   private readonly pollingInterval: number;
-
-  // Cached state
-  private currentLevel = 0;
-  private isOn = false;
-  private isPresent = false;
 
   constructor(
     public readonly log: Logger,
@@ -39,41 +35,57 @@ export class EightSleepPlatform implements DynamicPlatformPlugin {
     this.Service = this.homebridgeApi.hap.Service;
     this.Characteristic = this.homebridgeApi.hap.Characteristic;
 
-    const cfg = config as EightSleepPlatformConfig;
+    const cfg = config as PlatformConfig & { email: string; password: string; pollingInterval?: number };
     this.pollingInterval = (cfg.pollingInterval || 60) * 1000;
-
     this.api = new EightSleepAPI(cfg.email, cfg.password, this.log);
 
     this.homebridgeApi.on('didFinishLaunching', () => {
-      this.log.info('Eight Sleep platform finished launching');
       this.discoverDevices();
     });
   }
 
   configureAccessory(accessory: PlatformAccessory): void {
-    this.log.info('Loading accessory from cache:', accessory.displayName);
     this.accessories.push(accessory);
   }
 
   private async discoverDevices(): Promise<void> {
     try {
-      const info = await this.api.discover();
-      const uuid = this.homebridgeApi.hap.uuid.generate(`eightsleep-${info.deviceId}-${info.side}`);
-      const displayName = `Eight Sleep (${info.side})`;
+      const discovery = await this.api.discover();
 
-      const existing = this.accessories.find(a => a.UUID === uuid);
-      if (existing) {
-        this.log.info('Restoring existing accessory:', displayName);
-        this.setupServices(existing);
-      } else {
-        this.log.info('Adding new accessory:', displayName);
-        const accessory = new this.homebridgeApi.platformAccessory(displayName, uuid);
-        accessory.context.deviceId = info.deviceId;
-        accessory.context.userId = info.userId;
-        accessory.context.side = info.side;
-        this.setupServices(accessory);
-        this.homebridgeApi.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-        this.accessories.push(accessory);
+      for (const bedSide of discovery.sides) {
+        const uuid = this.homebridgeApi.hap.uuid.generate(`eightsleep-${discovery.deviceId}-${bedSide.side}`);
+        const displayName = `Eight Sleep (${bedSide.side})`;
+
+        this.sideStates.set(uuid, {
+          userId: bedSide.userId,
+          side: bedSide.side,
+          currentLevel: 0,
+          isOn: false,
+        });
+
+        const existing = this.accessories.find(a => a.UUID === uuid);
+        if (existing) {
+          this.log.info('Restoring accessory:', displayName);
+          this.setupThermostat(existing, uuid);
+        } else {
+          this.log.info('Adding accessory:', displayName);
+          const accessory = new this.homebridgeApi.platformAccessory(displayName, uuid);
+          accessory.context.deviceId = discovery.deviceId;
+          accessory.context.userId = bedSide.userId;
+          accessory.context.side = bedSide.side;
+          this.setupThermostat(accessory, uuid);
+          this.homebridgeApi.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+          this.accessories.push(accessory);
+        }
+      }
+
+      // Remove stale accessories for sides that no longer exist
+      const validUUIDs = discovery.sides.map(s =>
+        this.homebridgeApi.hap.uuid.generate(`eightsleep-${discovery.deviceId}-${s.side}`),
+      );
+      const stale = this.accessories.filter(a => !validUUIDs.includes(a.UUID));
+      if (stale.length > 0) {
+        this.homebridgeApi.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
       }
 
       this.startPolling();
@@ -82,26 +94,34 @@ export class EightSleepPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private setupServices(accessory: PlatformAccessory): void {
-    // --- Accessory Information ---
+  private setupThermostat(accessory: PlatformAccessory, uuid: string): void {
+    const state = this.sideStates.get(uuid)!;
+
     const infoService = accessory.getService(this.Service.AccessoryInformation)
       || accessory.addService(this.Service.AccessoryInformation);
     infoService
       .setCharacteristic(this.Characteristic.Manufacturer, 'Eight Sleep')
       .setCharacteristic(this.Characteristic.Model, 'Pod')
-      .setCharacteristic(this.Characteristic.SerialNumber, accessory.context.deviceId || 'Unknown');
+      .setCharacteristic(this.Characteristic.SerialNumber, `${accessory.context.deviceId}-${state.side}`);
 
-    // --- Thermostat (main temperature control) ---
+    // Remove any leftover services from previous versions
+    const occupancy = accessory.getService(this.Service.OccupancySensor);
+    if (occupancy) {
+      accessory.removeService(occupancy);
+    }
+    for (const svc of accessory.services.filter(s => s.UUID === this.Service.Switch.UUID)) {
+      accessory.removeService(svc);
+    }
+
     const thermostat = accessory.getService(this.Service.Thermostat)
-      || accessory.addService(this.Service.Thermostat, 'Temperature Control');
+      || accessory.addService(this.Service.Thermostat, `Temperature (${state.side})`);
 
-    // Heating/Cooling state: OFF or AUTO (smart mode)
     thermostat.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
       .onGet(() => {
-        if (!this.isOn) {
+        if (!state.isOn) {
           return this.Characteristic.CurrentHeatingCoolingState.OFF;
         }
-        return this.currentLevel < 0
+        return state.currentLevel < 0
           ? this.Characteristic.CurrentHeatingCoolingState.COOL
           : this.Characteristic.CurrentHeatingCoolingState.HEAT;
       });
@@ -114,134 +134,77 @@ export class EightSleepPlatform implements DynamicPlatformPlugin {
         ],
       })
       .onGet(() => {
-        return this.isOn
+        return state.isOn
           ? this.Characteristic.TargetHeatingCoolingState.AUTO
           : this.Characteristic.TargetHeatingCoolingState.OFF;
       })
       .onSet(async (value) => {
         try {
           if (value === this.Characteristic.TargetHeatingCoolingState.OFF) {
-            await this.api.turnOff();
-            this.isOn = false;
+            await this.api.turnOff(state.userId);
+            state.isOn = false;
           } else {
-            await this.api.turnOn();
-            this.isOn = true;
+            await this.api.turnOn(state.userId);
+            state.isOn = true;
           }
         } catch (err) {
-          this.log.error('Failed to set power state:', (err as Error).message);
+          this.log.error(`Failed to set power (${state.side}):`, (err as Error).message);
         }
       });
 
-    // Temperature: Map Eight Sleep level (-100..100) to Celsius (13..44)
     thermostat.getCharacteristic(this.Characteristic.CurrentTemperature)
       .setProps({ minValue: 13, maxValue: 44, minStep: 0.5 })
-      .onGet(() => EightSleepAPI.levelToCelsius(this.currentLevel));
+      .onGet(() => EightSleepAPI.levelToCelsius(state.currentLevel));
 
     thermostat.getCharacteristic(this.Characteristic.TargetTemperature)
       .setProps({ minValue: 13, maxValue: 44, minStep: 0.5 })
-      .onGet(() => EightSleepAPI.levelToCelsius(this.currentLevel))
+      .onGet(() => EightSleepAPI.levelToCelsius(state.currentLevel))
       .onSet(async (value) => {
         try {
           const level = EightSleepAPI.celsiusToLevel(value as number);
-          await this.api.setTemperature(level);
-          this.currentLevel = level;
+          await this.api.setTemperature(state.userId, level);
+          state.currentLevel = level;
         } catch (err) {
-          this.log.error('Failed to set temperature:', (err as Error).message);
+          this.log.error(`Failed to set temperature (${state.side}):`, (err as Error).message);
         }
       });
 
     thermostat.getCharacteristic(this.Characteristic.TemperatureDisplayUnits)
       .onGet(() => this.Characteristic.TemperatureDisplayUnits.CELSIUS)
-      .onSet(() => { /* HomeKit only sends Celsius internally */ });
-
-    // --- Occupancy Sensor (presence detection) ---
-    const occupancy = accessory.getService(this.Service.OccupancySensor)
-      || accessory.addService(this.Service.OccupancySensor, 'Bed Presence');
-
-    occupancy.getCharacteristic(this.Characteristic.OccupancyDetected)
-      .onGet(() => {
-        return this.isPresent
-          ? this.Characteristic.OccupancyDetected.OCCUPANCY_DETECTED
-          : this.Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED;
-      });
-
-    // --- Switch: Nap Mode ---
-    const napSwitch = accessory.getService('Nap Mode')
-      || accessory.addService(this.Service.Switch, 'Nap Mode', 'nap-mode');
-
-    let napModeOn = false;
-    napSwitch.getCharacteristic(this.Characteristic.On)
-      .onGet(() => napModeOn)
-      .onSet(async (value) => {
-        try {
-          if (value) {
-            await this.api.activateNapMode();
-          } else {
-            await this.api.deactivateNapMode();
-          }
-          napModeOn = value as boolean;
-        } catch (err) {
-          this.log.error('Failed to toggle nap mode:', (err as Error).message);
-        }
-      });
-
-    // --- Switch: Away Mode ---
-    const awaySwitch = accessory.getService('Away Mode')
-      || accessory.addService(this.Service.Switch, 'Away Mode', 'away-mode');
-
-    let awayModeOn = false;
-    awaySwitch.getCharacteristic(this.Characteristic.On)
-      .onGet(() => awayModeOn)
-      .onSet(async (value) => {
-        try {
-          await this.api.setAwayMode(value as boolean);
-          awayModeOn = value as boolean;
-        } catch (err) {
-          this.log.error('Failed to toggle away mode:', (err as Error).message);
-        }
-      });
+      .onSet(() => {});
   }
 
   private startPolling(): void {
-    this.pollTimer = setInterval(async () => {
-      try {
-        const temp = await this.api.getTemperature();
-        this.currentLevel = temp.currentLevel;
-        this.isOn = temp.currentState.type !== 'off';
+    setInterval(async () => {
+      for (const accessory of this.accessories) {
+        const state = this.sideStates.get(accessory.UUID);
+        if (!state) {
+          continue;
+        }
 
-        const presence = await this.api.getPresence();
-        this.isPresent = presence;
+        try {
+          const temp = await this.api.getTemperature(state.userId);
+          state.currentLevel = temp.currentLevel;
+          state.isOn = temp.currentState?.type !== 'off';
 
-        // Push updates to HomeKit
-        for (const accessory of this.accessories) {
           const thermostat = accessory.getService(this.Service.Thermostat);
           if (thermostat) {
             thermostat.updateCharacteristic(
               this.Characteristic.CurrentTemperature,
-              EightSleepAPI.levelToCelsius(this.currentLevel),
+              EightSleepAPI.levelToCelsius(state.currentLevel),
             );
             thermostat.updateCharacteristic(
               this.Characteristic.CurrentHeatingCoolingState,
-              !this.isOn
+              !state.isOn
                 ? this.Characteristic.CurrentHeatingCoolingState.OFF
-                : this.currentLevel < 0
+                : state.currentLevel < 0
                   ? this.Characteristic.CurrentHeatingCoolingState.COOL
                   : this.Characteristic.CurrentHeatingCoolingState.HEAT,
             );
           }
-
-          const occupancy = accessory.getService(this.Service.OccupancySensor);
-          if (occupancy) {
-            occupancy.updateCharacteristic(
-              this.Characteristic.OccupancyDetected,
-              this.isPresent
-                ? this.Characteristic.OccupancyDetected.OCCUPANCY_DETECTED
-                : this.Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
-            );
-          }
+        } catch (err) {
+          this.log.error(`Polling error (${state.side}):`, (err as Error).message);
         }
-      } catch (err) {
-        this.log.error('Polling error:', (err as Error).message);
       }
     }, this.pollingInterval);
   }
